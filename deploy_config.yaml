@@ -1,0 +1,16 @@
+region: "ca-central-1"
+role: "arn:aws:iam::820242914501:role/sm_default_exec_role_1drw"
+tracking_server_arn: "arn:aws:sagemaker:ca-central-1:820242914501:mlflow-tracking-server/test-mlflow"
+default_bucket: "sagemaker-ca-central-1-820242914501"
+model_package_group_name: "AbalonePackageGroup"
+deployment:
+  instance_type: "ml.m5.xlarge"
+  environments:
+    - prd
+  mode: "shadow-variant"
+  variant_weights: [0.6, 0.4]
+monitoring:
+  enabled: true
+  baseline_data_path: "s3://sagemaker-ca-central-1-820242914501/AbalonePipeline/znczwlse3yoc/AbalonePreprocessData/output/train/train.csv"
+  output_bucket: "sagemaker-ca-central-1-820242914501"
+  schedule_expression: "cron(0 12 * * ? *)"

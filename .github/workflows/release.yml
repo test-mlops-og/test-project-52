@@ -1,0 +1,85 @@
+name: Release Workflow
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Create Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
+
+
+      - name: Get latest tag
+        id: get_latest_tag
+        run: |
+          git fetch --tags
+          LATEST_TAG=$(git tag --sort=-v:refname | head -n 1)
+          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+
+      - name: Increment version
+        id: version
+        run: |
+          if [[ -z "${{ env.LATEST_TAG }}" ]]; then
+            NEW_TAG="v1.0.0"
+          else
+            IFS='.' read -r -a parts <<< "${{ env.LATEST_TAG }}"
+            PATCH=$((parts[2] + 1))
+            NEW_TAG="${parts[0]}.${parts[1]}.$PATCH"
+          fi
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "New tag: $NEW_TAG"
+
+      - name: Create GitHub Release with Auto-Generated Notes
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        with:
+          tag_name: ${{ env.NEW_TAG }}
+          release_name: Release ${{ env.NEW_TAG }}
+          body: |
+            📌 Auto-generated release notes:
+            ${{ github.event.head_commit.message }}
+
+            ---
+            
+            🛠️ **Please modify the release notes based on this template:**
+            
+            The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),  
+            and this project adheres to [Semantic Versioning](https://semver.org/).
+
+            ## [MAJOR.MINOR.PATCH] - YYYY-MM-DD
+            ### Added
+            - Add new feature X.
+            - Add API endpoint for Y.
+
+            ### Changed
+            - Update dependency Z to version 2.0.
+            - Refactor the authentication module.
+
+            ### Fixed
+            - Fix issue with login form validation.
+            - Fix bug where user sessions were not being cleared on logout.
+
+            ---
+            
+            ## Example
+            ### [1.1.0] - 2025-03-01
+            #### Added
+            - Added user profile page with editable fields.
+
+            #### Changed
+            - Updated UI components for consistency.
+
+            #### Fixed
+            - Fixed minor bug in the user authentication flow.
+          draft: false
+          prerelease: false
+          generate_release_notes: true

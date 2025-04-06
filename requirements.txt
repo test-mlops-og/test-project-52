@@ -1,0 +1,5 @@
+pyyaml
+xgboost
+sagemaker==2.240.0
+mlflow==2.16.0
+sagemaker-mlflow==0.1.0
