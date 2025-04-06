@@ -9,6 +9,7 @@ import boto3
 import mlflow
 import xgboost as xgb
 from mlflow import MlflowClient
+from sagemaker.serve import SchemaBuilder
 from sagemaker.model_monitor import DefaultModelMonitor
 
 # Glue job boilerplate imports
