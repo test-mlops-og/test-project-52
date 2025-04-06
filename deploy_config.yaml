@@ -9,7 +9,7 @@ deployment:
   environments:
     - prd
   mode: "single"
-  versions: [3]
+  versions: [1]
   variant_weights: [0.6, 0.4]
 monitoring:
   enabled: false
