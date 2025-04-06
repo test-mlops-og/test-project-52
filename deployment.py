@@ -9,8 +9,6 @@ import boto3
 import mlflow
 import xgboost as xgb
 from mlflow import MlflowClient
-from sagemaker.serve import SchemaBuilder, ModelBuilder
-from sagemaker.serve.mode.function_pointers import Mode
 from sagemaker.model_monitor import DefaultModelMonitor
 
 # Glue job boilerplate imports
@@ -112,44 +110,123 @@ def convert_to_csv(data: np.ndarray) -> str:
     """
     return ",".join(map(str, data.flatten().tolist()))
 
-def deploy_single_model(config, env, sklearn_schema_builder, model_version, instance_type, sklearn_input):
+def deploy_single_model(config, env, sklearn_schema_builder, model_version, instance_type, sklearn_input, configured_endpoint_name):
     """
-    Deploy a single model to a SageMaker endpoint.
+    Deploy a single model to a SageMaker endpoint using the configured endpoint name,
+    following a similar method to deploy_multi_variant and deploy_shadow_variant.
     """
-    print(f"Deploying Single Model for environment: {env}")
 
-    model_name = f"{config['model_package_group_name']}-v{model_version.version}-{env}"
-    role = config.get("role")
+    print(f"Deploying Single Model for environment: {env}")
     region = config.get("region")
     bucket = config.get("default_bucket")
+    role = config.get("role")
+    model_package_group_name = config['model_package_group_name']
 
-    model_builder = ModelBuilder(
-        name=model_name,
-        mode=Mode.SAGEMAKER_ENDPOINT,
-        schema_builder=sklearn_schema_builder,
-        role_arn=role,
-        model_metadata={"MLFLOW_MODEL_PATH": model_version.source},
-    )
+    # Use the configured endpoint name from the YAML configuration.
+    endpoint_name = configured_endpoint_name
+    endpoint_config_name = f"{endpoint_name}-config"
 
-    built_model = model_builder.build()
+    # Load the model using mlflow
+    model_uri = model_version.source
+    model = mlflow.xgboost.load_model(model_uri)
+    
+    # Save the model artifact locally
+    output_dir = f"model_version_{model_version.version}"
+    os.makedirs(output_dir, exist_ok=True)
+    model_path = os.path.join(output_dir, "xgboost-model.bst")
+    model.get_booster().save_model(model_path)
+    
+    # Package the model artifact
+    model_tar_file = f"model_v{model_version.version}.tar.gz"
+    with tarfile.open(model_tar_file, "w:gz") as tar:
+        tar.add(model_path, arcname="xgboost-model.bst")
+    
+    # Upload the model artifact to S3
+    s3 = boto3.client('s3')
+    s3_prefix = f"{model_package_group_name}/{env}/v{model_version.version}"
+    s3_uri = f"s3://{bucket}/{s3_prefix}/{model_tar_file}"
+    s3.upload_file(model_tar_file, bucket, f"{s3_prefix}/{model_tar_file}")
+    print(f"Uploaded model artifact to: {s3_uri}")
 
-    predictor = built_model.deploy(
-        initial_instance_count=1,
-        instance_type=instance_type,
-        data_capture_config={
-            "EnableCapture": True,
-            "InitialSamplingPercentage": 100,
-            "DestinationS3Uri": f"s3://{bucket}/{model_name}/data-capture",
-            "CaptureOptions": [{"CaptureMode": "Input"}, {"CaptureMode": "Output"}]
+    # Create a unique model name for the deployment
+    model_name = f"{model_package_group_name}-v{model_version.version}-{env}"
+
+    # Create the SageMaker model
+    sagemaker_client = boto3.client('sagemaker', region_name=region)
+    sagemaker_client.create_model(
+        ModelName=model_name,
+        ExecutionRoleArn=role,
+        PrimaryContainer={
+            "Image": "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1",
+            "ModelDataUrl": s3_uri
         }
     )
+    print(f"Created SageMaker model: {model_name}")
 
-    print(f"Deployed Single Model endpoint: {model_name}")
-    result = predictor.predict(sklearn_input)
-    print(result)
+    # Create the endpoint configuration with a single production variant
+    production_variant = {
+        "VariantName": "AllTraffic",
+        "ModelName": model_name,
+        "InstanceType": instance_type,
+        "InitialInstanceCount": 1,
+        "InitialVariantWeight": 1
+    }
+    sagemaker_client.create_endpoint_config(
+        EndpointConfigName=endpoint_config_name,
+        ProductionVariants=[production_variant],
+        DataCaptureConfig={
+            "EnableCapture": True,
+            "InitialSamplingPercentage": 100,
+            "DestinationS3Uri": f"s3://{bucket}/{endpoint_name}/data-capture",
+            "CaptureOptions": [{"CaptureMode": "Input"}, {"CaptureMode": "Output"}],
+            "CaptureContentTypeHeader": {
+                "CsvContentTypes": ["text/csv"],
+                "JsonContentTypes": ["application/json"]
+            }
+        }
+    )
+    print(f"Created endpoint configuration: {endpoint_config_name}")
 
-    setup_monitoring(model_name, config, role, instance_type)
-    return predictor
+    # Create the endpoint
+    sagemaker_client.create_endpoint(
+        EndpointName=endpoint_name,
+        EndpointConfigName=endpoint_config_name
+    )
+    print(f"Deploying endpoint: {endpoint_name}")
+
+    # Wait for the endpoint to become InService
+    elapsed_time = 0
+    timeout = 600
+    while True:
+        response = sagemaker_client.describe_endpoint(EndpointName=endpoint_name)
+        status = response["EndpointStatus"]
+        print(f"Endpoint status: {status}")
+        if status == "InService":
+            print(f"Endpoint {endpoint_name} is InService.")
+            break
+        elif status == "Failed":
+            raise Exception(f"Endpoint creation failed: {response['FailureReason']}")
+        time.sleep(30)
+        elapsed_time += 30
+        print(f"Elapsed time: {elapsed_time}/{timeout} seconds")
+        if elapsed_time > timeout:
+            raise TimeoutError(f"Endpoint {endpoint_name} did not reach 'InService' status within {timeout} seconds.")
+
+    # Test inference on the deployed endpoint
+    runtime = boto3.client("sagemaker-runtime")
+    csv_payload = ",".join(map(str, sklearn_input.flatten().tolist()))
+    response = runtime.invoke_endpoint(
+        EndpointName=endpoint_name,
+        ContentType="text/csv",
+        Body=csv_payload.encode("utf-8")
+    )
+    result = response['Body'].read().decode("utf-8")
+    print(f"Endpoint {endpoint_name} inference result: {result}")
+
+    # Setup monitoring if enabled
+    setup_monitoring(endpoint_name, config, role, instance_type)
+    print(f"Deployed Single Model endpoint for {env} environment.")
+
 
 def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance_type, sklearn_input):
     """
@@ -165,11 +242,12 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
     timestamp = int(time.time())
+    
+    # For multi-variant mode, generate a new endpoint name since a shadow or single mode name is not used.
     endpoint_config_name = f"{model_package_group_name}-multi-config-{env}-{timestamp}"
     endpoint_name = f"{model_package_group_name}-multi-{env}-{timestamp}"
     variant_names = [f"Modelv{version.version}" for version in versions]
 
-    model_names = []
     for i, version in enumerate(versions):
         print(f"Processing model version: {version.version}")
         model_uri = version.source
@@ -187,7 +265,6 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
         print(f"Uploaded model artifact to: {s3_uri}")
         
         model_name = f"{model_package_group_name}-v{version.version}-{env}-{timestamp}"
-        model_names.append(model_name)
         sagemaker_client.create_model(
             ModelName=model_name,
             ExecutionRoleArn=role,
@@ -259,10 +336,10 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
     setup_monitoring(endpoint_name, config, role, instance_type)
     print(f"Deployed Multi-Variant endpoint for {env} environment.")
 
-def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instance_type, sklearn_input):
+def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instance_type, sklearn_input, configured_endpoint_name):
     """
     Deploys a shadow variant endpoint by designating one model as the primary variant 
-    and another as a shadow variant.
+    and another as a shadow variant, using the configured endpoint name.
     """
     s3 = boto3.client('s3')
     region = config.get("region")
@@ -272,12 +349,11 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
     model_variants = []
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
-    timestamp = int(time.time())
-    endpoint_config_name = f"{model_package_group_name}-shadow-config-{env}-{timestamp}"
-    endpoint_name = f"{model_package_group_name}-shadow-{env}-{timestamp}"
-    variant_names = [f"Modelv{version.version}" for version in versions]
+    
+    # Use the endpoint name defined in the YAML configuration.
+    endpoint_name = configured_endpoint_name
+    endpoint_config_name = f"{endpoint_name}-config"
 
-    model_names = []
     for i, version in enumerate(versions):
         print(f"Processing model version: {version.version}")
         model_uri = version.source
@@ -294,8 +370,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
         s3.upload_file(model_tar_file, bucket, f"{s3_prefix}/{model_tar_file}")
         print(f"Uploaded model artifact to: {s3_uri}")
         
-        model_name = f"{model_package_group_name}-v{version.version}-{env}-{timestamp}"
-        model_names.append(model_name)
+        model_name = f"{model_package_group_name}-v{version.version}-{env}"
         sagemaker_client.create_model(
             ModelName=model_name,
             ExecutionRoleArn=role,
@@ -312,6 +387,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
             "InitialVariantWeight": 1
         })
 
+    # In this shadow-variant setup, we assume that the first variant is the shadow and the second is primary.
     primary_variant = [model_variants[1]]
     shadow_variant = [model_variants[0]]
 
@@ -366,28 +442,11 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
             Body=csv_payload.encode("utf-8")
     )
     print(f"Endpoint {endpoint_name} inference result: {response['Body'].read().decode('utf-8')}")
-    time.sleep(300)
-    shadow_variant_name = model_variants[0]['VariantName']
-    endpoint_capture_prefix = f"{endpoint_name}/data-capture/{endpoint_name}/{shadow_variant_name}"
-    result = s3.list_objects(Bucket=bucket, Prefix=endpoint_capture_prefix)
-    if "Contents" in result:
-        shadow_var_capture_files = [capture_file.get("Key") for capture_file in result.get("Contents")]
-        def get_obj_body(obj_key):
-            return s3.get_object(Bucket=bucket, Key=obj_key).get('Body').read().decode("utf-8")
-        shadow_var_capture_file = get_obj_body(shadow_var_capture_files[-1])
-        try:
-            capture_json = json.loads(shadow_var_capture_file.split('\n')[0])
-            print("Shadow Variant Capture Data:")
-            print(json.dumps(capture_json, indent=2))
-        except Exception as e:
-            print("Error parsing shadow capture file:", e)
-    else:
-        print("No shadow capture files found at the specified S3 prefix.")
     setup_monitoring(endpoint_name, config, role, instance_type)
     print(f"Deployed Shadow Variant endpoint for {env} environment.")
 
 def main():
-    # The configuration file is loaded from the S3 URI passed in as CONFIG_PATH
+    # Load configuration file (local or S3)
     config_file = args.get("config_path")
     config = load_config(config_file)
 
@@ -399,10 +458,17 @@ def main():
     environments = deployment_config.get("environments", [])
     instance_type = deployment_config.get("instance_type", "ml.m5.xlarge")
     mode = deployment_config.get("mode", "single")
-
+    # Get the configured endpoint name from the YAML file
+    configured_endpoint_name = deployment_config.get("endpoint_name")
+    # Get the version numbers from the YAML file (e.g., [3]) and filter the returned versions accordingly.
+    config_versions = deployment_config.get("versions", [])
     versions = client.search_model_versions(f"name='{config['model_package_group_name']}'")
     if not versions:
         raise ValueError("No model versions found.")
+    
+    selected_versions = [v for v in versions if int(v.version) in config_versions]
+    if not selected_versions:
+        raise ValueError("No model versions matching the deploy config versions were found.")
 
     sklearn_input = np.array([
         -0.6161975481284616,
@@ -424,14 +490,15 @@ def main():
             sample_output=sklearn_output,
         )
         if mode == "single":
-            deploy_single_model(config, env, sklearn_schema_builder, versions[0], instance_type, sklearn_input)
+            deploy_single_model(config, env, sklearn_schema_builder, selected_versions[0], instance_type, sklearn_input, configured_endpoint_name)
         elif mode == "multi-variant":
             variant_weights = deployment_config.get("variant_weights")
-            if len(versions) < len(variant_weights):
+            if len(selected_versions) < len(variant_weights):
                 raise ValueError("Insufficient model versions for the specified variant weights.")
-            deploy_multi_variant(config, env, sklearn_schema_builder, versions[:len(variant_weights)], instance_type, sklearn_input)
+            deploy_multi_variant(config, env, sklearn_schema_builder, selected_versions[:len(variant_weights)], instance_type, sklearn_input)
         elif mode == "shadow-variant":
-            deploy_shadow_variant(config, env, sklearn_schema_builder, versions[:2], instance_type, sklearn_input)
+            # For shadow deployment, use the first two matching versions and the configured endpoint name.
+            deploy_shadow_variant(config, env, sklearn_schema_builder, selected_versions[:2], instance_type, sklearn_input, configured_endpoint_name)
         else:
             print(f"Invalid mode: {mode}. Please use 'single', 'multi-variant', or 'shadow-variant'.")
 
