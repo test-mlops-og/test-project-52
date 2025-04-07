@@ -8,8 +8,8 @@ deployment:
   instance_type: "ml.m5.xlarge"
   environments:
     - prd
-  mode: "single"
-  versions: [1]
+  mode: "shadow-variant"
+  versions: [2,3]
   variant_weights: [0.6, 0.4]
 monitoring:
   enabled: false
