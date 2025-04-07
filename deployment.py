@@ -174,7 +174,7 @@ def deploy_single_model(config, env, sklearn_schema_builder, model_version, inst
 
     # Use the configured endpoint name from the YAML configuration.
     endpoint_name = configured_endpoint_name
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%y%m%d%H%M")
     endpoint_config_name = f"{endpoint_name}-single-{env}-config-{timestamp}"
 
     # Load the model using mlflow
@@ -281,7 +281,7 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
     image = "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1"
-    timestamp = int(time.time())
+    timestamp = datetime.now().strftime("%y%m%d%H%M")
     
     # For multi-variant mode, generate a new endpoint name since a shadow or single mode name is not used.
     endpoint_config_name = f"{model_package_group_name}-multi-config-{env}-{timestamp}"
@@ -383,7 +383,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
     
     # Use the endpoint name defined in the YAML configuration.
     endpoint_name = configured_endpoint_name
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now().strftime("%y%m%d%H%M")
     endpoint_config_name = f"{endpoint_name}-shadow-{env}-config-{timestamp}"
 
     for i, version in enumerate(versions):
