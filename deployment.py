@@ -111,6 +111,30 @@ def convert_to_csv(data: np.ndarray) -> str:
     """
     return ",".join(map(str, data.flatten().tolist()))
 
+def create_or_update_endpoint(sagemaker_client, endpoint_name, endpoint_config_name):
+    """
+    Checks whether an endpoint exists. If it exists, update the endpoint with the new configuration.
+    Otherwise, create a new endpoint.
+    """
+    try:
+        # Try to retrieve the endpoint description.
+        response = sagemaker_client.describe_endpoint(EndpointName=endpoint_name)
+        print(f"Endpoint {endpoint_name} exists. Updating endpoint configuration to {endpoint_config_name}...")
+        sagemaker_client.update_endpoint(
+            EndpointName=endpoint_name,
+            EndpointConfigName=endpoint_config_name
+        )
+    except sagemaker_client.exceptions.ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code in ["ValidationException", "ResourceNotFoundException", "NotFound"]:
+            print(f"Endpoint {endpoint_name} does not exist. Creating new endpoint with configuration {endpoint_config_name}...")
+            sagemaker_client.create_endpoint(
+                EndpointName=endpoint_name,
+                EndpointConfigName=endpoint_config_name
+            )
+        else:
+            raise
+
 def deploy_single_model(config, env, sklearn_schema_builder, model_version, instance_type, sklearn_input, configured_endpoint_name):
     """
     Deploy a single model to a SageMaker endpoint using the configured endpoint name,
@@ -188,11 +212,8 @@ def deploy_single_model(config, env, sklearn_schema_builder, model_version, inst
     )
     print(f"Created endpoint configuration: {endpoint_config_name}")
 
-    # Create the endpoint
-    sagemaker_client.create_endpoint(
-        EndpointName=endpoint_name,
-        EndpointConfigName=endpoint_config_name
-    )
+    # Create or update the endpoint using the helper function
+    create_or_update_endpoint(sagemaker_client, endpoint_name, endpoint_config_name)
     print(f"Deploying endpoint: {endpoint_name}")
 
     # Wait for the endpoint to become InService
@@ -227,7 +248,6 @@ def deploy_single_model(config, env, sklearn_schema_builder, model_version, inst
     # Setup monitoring if enabled
     setup_monitoring(endpoint_name, config, role, instance_type)
     print(f"Deployed Single Model endpoint for {env} environment.")
-
 
 def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance_type, sklearn_input):
     """
@@ -298,10 +318,7 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
     )
 
     print("Deploying multi-variant endpoint...")
-    sagemaker_client.create_endpoint(
-        EndpointName=endpoint_name,
-        EndpointConfigName=endpoint_config_name
-    )
+    create_or_update_endpoint(sagemaker_client, endpoint_name, endpoint_config_name)
 
     print(f"Waiting for endpoint {endpoint_name} to be InService...")
     elapsed_time = 0
@@ -409,10 +426,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
     )
 
     print("Deploying shadow variant endpoint...")
-    sagemaker_client.create_endpoint(
-        EndpointName=endpoint_name,
-        EndpointConfigName=endpoint_config_name
-    )
+    create_or_update_endpoint(sagemaker_client, endpoint_name, endpoint_config_name)
 
     print(f"Waiting for endpoint {endpoint_name} to be InService...")
     elapsed_time = 0
