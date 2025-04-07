@@ -135,17 +135,40 @@ def create_or_update_endpoint(sagemaker_client, endpoint_name, endpoint_config_n
         else:
             raise
 
+def create_model_if_not_exists(sagemaker_client, model_name, role, s3_uri, image):
+    """
+    Checks whether a SageMaker model exists. If not, create it.
+    Since models are immutable once created, if a model with the name exists, we reuse it.
+    """
+    try:
+        sagemaker_client.describe_model(ModelName=model_name)
+        print(f"Model {model_name} already exists, skipping creation.")
+    except sagemaker_client.exceptions.ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code in ["ValidationException", "ResourceNotFoundException", "NotFound"]:
+            sagemaker_client.create_model(
+                ModelName=model_name,
+                ExecutionRoleArn=role,
+                PrimaryContainer={
+                    "Image": image,
+                    "ModelDataUrl": s3_uri
+                }
+            )
+            print(f"Created SageMaker model: {model_name}")
+        else:
+            raise
+
 def deploy_single_model(config, env, sklearn_schema_builder, model_version, instance_type, sklearn_input, configured_endpoint_name):
     """
     Deploy a single model to a SageMaker endpoint using the configured endpoint name,
     following a similar method to deploy_multi_variant and deploy_shadow_variant.
     """
-
     print(f"Deploying Single Model for environment: {env}")
     region = config.get("region")
     bucket = config.get("default_bucket")
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
+    image = "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1"
 
     # Use the configured endpoint name from the YAML configuration.
     endpoint_name = configured_endpoint_name
@@ -176,17 +199,9 @@ def deploy_single_model(config, env, sklearn_schema_builder, model_version, inst
     # Create a unique model name for the deployment
     model_name = f"{model_package_group_name}-v{model_version.version}-{env}"
 
-    # Create the SageMaker model
+    # Create the SageMaker model if it does not exist.
     sagemaker_client = boto3.client('sagemaker', region_name=region)
-    sagemaker_client.create_model(
-        ModelName=model_name,
-        ExecutionRoleArn=role,
-        PrimaryContainer={
-            "Image": "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1",
-            "ModelDataUrl": s3_uri
-        }
-    )
-    print(f"Created SageMaker model: {model_name}")
+    create_model_if_not_exists(sagemaker_client, model_name, role, s3_uri, image)
 
     # Create the endpoint configuration with a single production variant
     production_variant = {
@@ -262,6 +277,7 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
     model_variants = []
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
+    image = "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1"
     timestamp = int(time.time())
     
     # For multi-variant mode, generate a new endpoint name since a shadow or single mode name is not used.
@@ -286,14 +302,7 @@ def deploy_multi_variant(config, env, sklearn_schema_builder, versions, instance
         print(f"Uploaded model artifact to: {s3_uri}")
         
         model_name = f"{model_package_group_name}-v{version.version}-{env}-{timestamp}"
-        sagemaker_client.create_model(
-            ModelName=model_name,
-            ExecutionRoleArn=role,
-            PrimaryContainer={
-                "Image": "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1",
-                "ModelDataUrl": s3_uri
-            }
-        )
+        create_model_if_not_exists(sagemaker_client, model_name, role, s3_uri, image)
         model_variants.append({
             "VariantName": f"Modelv{version.version}",
             "ModelName": model_name,
@@ -367,6 +376,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
     model_variants = []
     role = config.get("role")
     model_package_group_name = config['model_package_group_name']
+    image = "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1"
     
     # Use the endpoint name defined in the YAML configuration.
     endpoint_name = configured_endpoint_name
@@ -389,14 +399,7 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
         print(f"Uploaded model artifact to: {s3_uri}")
         
         model_name = f"{model_package_group_name}-v{version.version}-{env}"
-        sagemaker_client.create_model(
-            ModelName=model_name,
-            ExecutionRoleArn=role,
-            PrimaryContainer={
-                "Image": "341280168497.dkr.ecr.ca-central-1.amazonaws.com/sagemaker-xgboost:1.7-1",
-                "ModelDataUrl": s3_uri
-            }
-        )
+        create_model_if_not_exists(sagemaker_client, model_name, role, s3_uri, image)
         model_variants.append({
             "VariantName": f"Modelv{version.version}",
             "ModelName": model_name,
