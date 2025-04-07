@@ -18,6 +18,8 @@ from awsglue.context import GlueContext
 from pyspark.context import SparkContext
 from awsglue.job import Job
 
+from datetime import datetime
+
 # Parse Glue job arguments (e.g., JOB_NAME and CONFIG_PATH)
 args = getResolvedOptions(sys.argv, ['JOB_NAME', 'config_path'])
 sc = SparkContext.getOrCreate()
@@ -172,7 +174,8 @@ def deploy_single_model(config, env, sklearn_schema_builder, model_version, inst
 
     # Use the configured endpoint name from the YAML configuration.
     endpoint_name = configured_endpoint_name
-    endpoint_config_name = f"{endpoint_name}-config"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    endpoint_config_name = f"{endpoint_name}-single-{env}-config-{timestamp}"
 
     # Load the model using mlflow
     model_uri = model_version.source
@@ -380,7 +383,8 @@ def deploy_shadow_variant(config, env, sklearn_schema_builder, versions, instanc
     
     # Use the endpoint name defined in the YAML configuration.
     endpoint_name = configured_endpoint_name
-    endpoint_config_name = f"{endpoint_name}-config"
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    endpoint_config_name = f"{endpoint_name}-shadow-{env}-config-{timestamp}"
 
     for i, version in enumerate(versions):
         print(f"Processing model version: {version.version}")
